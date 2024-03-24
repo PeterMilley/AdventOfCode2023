@@ -1,0 +1,52 @@
+(load "stdlib.txt" "input_1.txt"
+(let
+  simple_input
+"1abc2
+pqr3stu8vwx
+a1b2c3d4e5f
+treb7uchet"
+
+  digits (\s (map todigit (filter isdigit (chars s))))
+
+  do_row (\d (+ (* 10 (unsafe_head d)) (unsafe_last d)))
+
+  is_prefix (\s t (and (> (strcat t (chr 47)) s) (> (strcat s (chr 123)) t)))
+
+  str_tails (\s (map (\l (l strcat "")) (tails (chars s))))
+
+  numbers (list
+    (tuple "1" 1)
+    (tuple "2" 2)
+    (tuple "3" 3)
+    (tuple "4" 4)
+    (tuple "5" 5)
+    (tuple "6" 6)
+    (tuple "7" 7)
+    (tuple "8" 8)
+    (tuple "9" 9)
+    (tuple "one" 1)
+    (tuple "two" 2)
+    (tuple "three" 3)
+    (tuple "four" 4)
+    (tuple "five" 5)
+    (tuple "six" 6)
+    (tuple "seven" 7)
+    (tuple "eight" 8)
+    (tuple "nine" 9)
+  )
+
+  map_prefix (\t s (t (\_1 _2 (if (is_prefix _1 s) (just _2) nil))))
+
+  map_prefixes
+    (map map_prefix numbers      [ :: List<Str -> Option<int>> ]
+      (\a x (\s (x s just (a s))))
+      (\s nil)
+    )
+
+  digits2 (\s (filterMap map_prefixes (str_tails s)))
+
+  part1_ (print "Part 1: " (itoa (splitStrFold '\n' long_input (\a x (+ (do_row (digits a)) x)) 0)) "\n")
+  part2_ (print "Part 2: " (itoa (splitStrFold '\n' long_input (\a x (+ (do_row (digits2 a)) x)) 0)) "\n")
+
+  ()
+))

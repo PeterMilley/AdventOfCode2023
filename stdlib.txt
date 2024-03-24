@@ -1,0 +1,101 @@
+(let
+  id (\x x)
+  and (\a b (if a b false))
+  or  (\a b (if a true b))
+  not (\a (if a false true))
+  
+  [ list definitions and utils ]
+  nil (macro k f f)
+  cons (\x l (macro k f (k x (l k f))))
+  snoc (\l x (macro k f (l k (k x f))))
+  map (\g l (macro k f (l (\a x (k (g a) x)) f)))
+  filter (\p l (macro k f (l (\a x (if (p a) (k a x) x)) f)))
+
+  filterMap (\p l (macro k f (l (\a x (p a (\v (k v x)) x)) f)))
+
+  [ consuming lists ]
+  length (\l (l (\a x (+ 1 x)) 0))
+  flatten (\m k f (m (\a x (a k x)) f))
+  [ foldl :: (a -> b -> a) -> a -> List<b> -> a ]
+  foldl (\f z l (l (\b g a (g (f a b))) id z))
+
+  [ character utils ]
+  isdigit (\c (let o (ord c) (and (> o 47) (> 58 o))))
+  todigit (\c (- (ord c) 48))
+
+  [ primitive tuples and options ]
+  tuple (\a b f (f a b))
+  fst (\t (t (\a b a))) snd (\t (t (\a b b)))
+  just (\x (macro k f (k x)))
+
+  [ safe head and last ]
+  head (\l (l (\a x (just a)) nil))
+  last (\l (l (\a x (x just (just a))) nil))
+
+  [ unsafe head and last ]
+  unsafe_head (\l ((head l) id fail))
+  unsafe_last (\l ((last l) id fail))
+
+  [ uncons has type List<a> -> (a -> List<a> -> r) -> r -> r ]
+  [ good for pattern-matching against small lists            ]
+  [ very unefficient for large lists                         ]
+  [ try to write it as a right fold instead                  ]
+  uncons (\l (l (\a x (x (\h t (macro k f (k a (cons h t)))) (macro k f (k a nil)))) nil))
+
+  [ fix will run forever unless 'f' is itself a macro in its first param ]
+  fix (\f ((macro x (f (x x))) (macro x (f (x x)))))
+
+  [ complicated list utilities ]
+  split (\p l (
+    (l
+      (\a x
+	(if (p a)
+	  (tuple nil (x cons))
+	  (x (\_1 _2 (tuple (cons a _1) _2)))
+	)
+      )
+      (tuple nil nil)
+    )
+    cons
+  ))
+
+  splitStr (\c s (
+    (chars s
+      (\a x
+	(if (= c a)
+	  (tuple "" (x cons))
+	  (x (\_1 _2 (tuple (strcat a _1) _2)))
+	)
+      )
+      (tuple "" nil)
+    )
+    cons
+  ))
+
+  splitStrFold (\c s f b (
+    (chars s
+      (\a x
+        (if (= c a)
+	  (tuple "" (x f))
+	  (x (\_1 _2 (tuple (strcat a _1) _2)))
+	)
+      )
+      (tuple "" b)
+    )
+    f
+  ))
+
+  tails (\l (snd (l
+    (\a x
+      (x (\_1 _2
+        (let next (cons a _1)
+	  (tuple next (cons next _2))
+	)
+      ))
+    )
+    (tuple nil (cons nil nil))
+  )))
+
+  [ pretty-print a list of integers]
+  prettyprint (\l (strcat "[" (uncons l (\x xs (strcat (itoa x) (xs (\a x (strcat "," (itoa a) x)) ""))) "") "]"))
+())
