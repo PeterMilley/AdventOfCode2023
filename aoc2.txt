@@ -1,0 +1,60 @@
+(load "stdlib.txt" "input_2.txt"
+(let
+  simple_input
+"Game 1: 3 blue, 4 red; 1 red, 2 green, 6 blue; 2 green
+Game 2: 1 blue, 2 green; 3 green, 4 blue, 1 red; 1 green, 1 blue
+Game 3: 8 green, 6 blue, 20 red; 5 blue, 4 red, 13 green; 5 green, 1 red
+Game 4: 1 green, 3 red, 6 blue; 3 green, 6 red; 3 green, 15 blue, 14 red
+Game 5: 6 red, 1 blue, 3 green; 2 blue, 1 red, 2 green"
+
+  a_to_i (\s (foldl (\a b (+ (* 10 a) b)) 0 (map todigit (filter isdigit (chars s)))))
+
+  line_to_case (\s (let l (splitStr ':' s)
+                     (tuple (a_to_i (unsafe_head l)) (unsafe_last l))))
+
+  case_to_draws (\c (splitStr ';' (snd c)))
+
+  draw_to_counts (\d (splitStr ',' d))
+  
+  valid_count (\s
+    (let
+      parts (splitStr ' ' s)
+      colour (unsafe_last parts)
+      count ((map a_to_i parts) + 0)
+      (if (= colour "red") (> 13 count)
+        (if (= colour "green") (> 14 count) (> 15 count))))
+  )
+
+  valid_draw (\d ((map valid_count (draw_to_counts d)) and true))
+
+  valid_case (\c ((map valid_draw (case_to_draws c)) and true))
+
+  part1_ (print "Part 1: " (itoa (splitStrFold '\n' long_input
+    (\line total (let case (line_to_case line)
+                   (if (valid_case case) (+ total (fst case)) total)))
+    0)) "\n")
+
+  case_to_all_counts (\c (flatten (map draw_to_counts (case_to_draws c))))
+
+  count_to_tuple (\s
+    (let
+      parts (splitStr ' ' s)
+      colour (unsafe_last parts)
+      count ((map a_to_i parts) + 0)
+      (tuple count colour)))
+
+  max (\a b (if (> a b) a b))
+
+  case_to_power (\c
+    (let
+      tuples (map count_to_tuple (case_to_all_counts c))
+      red ((filterMap (\t (if (= (snd t) "red") (just (fst t)) nil)) tuples) max 0)
+      green ((filterMap (\t (if (= (snd t) "green") (just (fst t)) nil)) tuples) max 0)
+      blue ((filterMap (\t (if (= (snd t) "blue") (just (fst t)) nil)) tuples) max 0)
+      (* red green blue)))
+
+  part2_ (print "Part 2: " (itoa (splitStrFold '\n' long_input
+    (\line total (let case (line_to_case line) (+ total (case_to_power case)))) 0)) "\n")
+
+  ()
+))
