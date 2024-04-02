@@ -11,6 +11,7 @@
   map (\g l (macro k f (l (\a x (k (g a) x)) f)))
   filter (\p l (macro k f (l (\a x (if (p a) (k a x) x)) f)))
 
+  [ filterMap :: (a -> Option<b>) -> List<a> -> List<b> ]
   filterMap (\p l (macro k f (l (\a x (p a (\v (k v x)) x)) f)))
 
   [ consuming lists ]
@@ -36,9 +37,9 @@
   unsafe_head (\l ((head l) id fail))
   unsafe_last (\l ((last l) id fail))
 
-  [ uncons has type List<a> -> (a -> List<a> -> r) -> r -> r ]
+  [ uncons :: List<a> -> (a -> List<a> -> r) -> r -> r       ]
   [ good for pattern-matching against small lists            ]
-  [ very unefficient for large lists                         ]
+  [ very inefficient for large lists                         ]
   [ try to write it as a right fold instead                  ]
   uncons (\l (l (\a x (x (\h t (macro k f (k a (cons h t)))) (macro k f (k a nil)))) nil))
 
