@@ -107,53 +107,50 @@ pub enum ExprOrValue {
 
 // What to do with the result of an evaluated expression.
 pub enum Callback {
-    // Return the result.
-    Return,
-
     // Restore an old environment before continuing.
-    Restore(Rc<varenv::Env>, Box<Callback>),
+    Restore(Rc<varenv::Env>),
 
     // Update the environment with the result then continue evaluation.
-    Update(String, ExprOrValue, Box<Callback>),
+    Update(String, ExprOrValue),
 
     // Discard the immediate result and continue evaluation.
-    DropResult(ExprOrValue, Box<Callback>),
+    DropResult(ExprOrValue),
 
     // Branch based on the result.
-    Branch(ExprOrValue, ExprOrValue, Box<Callback>),
+    Branch(ExprOrValue, ExprOrValue),
 
     // Print the result, then continue.
-    Print(ExprOrValue, Box<Callback>),
+    Print(ExprOrValue),
 
     // Apply the result to a sequence of arguments.
-    Apply(VecDeque<ExprOrValue>, Box<Callback>),
+    Apply(VecDeque<ExprOrValue>),
 
     // Evaluate the body of a function with the given value as an argument.
     // Like Update, but applies to a saved environment.
-    Body(String, Rc<varenv::Env>, ExprOrValue, Box<Callback>),
+    Body(String, Rc<varenv::Env>, ExprOrValue),
 
     // Accumulate the result into a partial sum.
-    PartialSum(i64, VecDeque<ExprOrValue>, Box<Callback>),
+    PartialSum(i64, VecDeque<ExprOrValue>),
 
     // Accumulate the result into a partial product.
-    PartialProduct(i64, VecDeque<ExprOrValue>, Box<Callback>),
+    PartialProduct(i64, VecDeque<ExprOrValue>),
 
     // Accumulate the result into a sequence of values.
-    Sequence(Vec<value::Value>, VecDeque<ExprOrValue>, Box<Callback>),
+    Sequence(Vec<value::Value>, VecDeque<ExprOrValue>),
 
     // Consume a sequence of values as arguments to an operator.
-    Minus(Box<Callback>),
-    Div(Box<Callback>),
-    Mod(Box<Callback>),
-    Eq(Box<Callback>),
-    Gt(Box<Callback>),
+    Minus,
+    Div,
+    Mod,
+    Eq,
+    Gt,
 
     // Consume a sequence of values as arguments to a built-in function.
-    Builtin(builtins::Builtin, Box<Callback>),
+    Builtin(builtins::Builtin),
 
     // Consume a sequence of strings as filenames, evaluate the code in those
     // files, the continue evaluating the expression.
-    Load(VecDeque<String>, ExprOrValue, Box<Callback>),
+    Load(VecDeque<String>, ExprOrValue),
 
     // Special handling (i.e. extreme hackery) for folding over constant lists
     // such as native string data.
@@ -162,15 +159,14 @@ pub enum Callback {
     // and 'returns'
     // a callable object that acts like a foldr over a list of values.
     // 'HandleFold' is a helper object that performs the resulting fold.
-    Fold(Rc<Vec<value::Value>>, usize, Box<Callback>),
-    HandleFold(Rc<Vec<value::Value>>, usize, value::Value, Box<Callback>),
+    Fold(Rc<Vec<value::Value>>, usize),
+    HandleFold(Rc<Vec<value::Value>>, usize, value::Value),
 }
 
 // A piece of evaluation work to do.
 pub struct Work {
     expr: ExprOrValue,
     env: Rc<varenv::Env>,
-    callback: Callback,
 }
 
 // The result of doing a piece of work.
@@ -179,110 +175,112 @@ pub enum Outcome {
     Continue(Work),
 }
 
-fn cont(expr: ExprOrValue, env: Rc<varenv::Env>, callback: Callback) -> Result<Outcome, EvalError> {
+fn cont(expr: ExprOrValue, env: Rc<varenv::Env>) -> Result<Outcome, EvalError> {
     Ok(Outcome::Continue(Work {
         expr: expr,
         env: env,
-        callback: callback,
     }))
 }
 
-fn wait(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome, EvalError> {
+fn wait(env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome, EvalError> {
     Ok(Outcome::Continue(Work {
         expr: ExprOrValue::Value(v),
         env: env,
-        callback: cb,
     }))
 }
 
-fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome, EvalError> {
+fn run_cb(
+    stack: &mut Vec<Callback>,
+    env: Rc<varenv::Env>,
+    v: value::Value,
+) -> Result<Outcome, EvalError> {
+    if stack.is_empty() {
+        return Ok(Outcome::Done(v, env));
+    }
+    let cb = stack.pop().unwrap();
     match cb {
-        Callback::Return => Ok(Outcome::Done(v, env)),
+        Callback::Restore(old_env) => wait(old_env, v),
 
-        Callback::Restore(old_env, next) => wait(*next, old_env, v),
-
-        Callback::Update(var, body, next) => {
+        Callback::Update(var, body) => {
             let mut env = env;
             varenv::update(&mut env, var, v);
-            cont(body, env, *next)
+            cont(body, env)
         }
 
-        Callback::DropResult(body, next) => cont(body, env, *next),
+        Callback::DropResult(body) => cont(body, env),
 
-        Callback::Branch(iftrue, iffalse, next) => {
+        Callback::Branch(iftrue, iffalse) => {
             if let value::Value::Bool(b) = v {
-                cont(if b { iftrue } else { iffalse }, env, *next)
+                cont(if b { iftrue } else { iffalse }, env)
             } else {
                 Err(EvalError::ExpectedBool(v))
             }
         }
 
-        Callback::Print(body, next) => {
+        Callback::Print(body) => {
             if let value::Value::Str(s) = v {
                 println!("{}", s);
-                cont(body, env, *next)
+                cont(body, env)
             } else {
                 Err(EvalError::ExpectedStr(v))
             }
         }
 
-        Callback::Apply(args, next) => {
+        Callback::Apply(args) => {
             let mut args = args;
-            let mut next = next;
             if args.is_empty() {
                 return Err(EvalError::MissingArgs);
             }
             let arg1 = args.pop_front().unwrap();
             match v {
-                value::Value::Builtin(b) => cont(
-                    arg1,
-                    env,
-                    Callback::Sequence(Vec::new(), args, Box::new(Callback::Builtin(b, next))),
-                ),
+                value::Value::Builtin(b) => {
+                    stack.push(Callback::Builtin(b));
+                    stack.push(Callback::Sequence(Vec::new(), args));
+                    cont(arg1, env)
+                }
                 value::Value::Op(operators::Op::Plus) => {
-                    cont(arg1, env, Callback::PartialSum(0, args, next))
+                    stack.push(Callback::PartialSum(0, args));
+                    cont(arg1, env)
                 }
                 value::Value::Op(operators::Op::Times) => {
-                    cont(arg1, env, Callback::PartialProduct(1, args, next))
+                    stack.push(Callback::PartialProduct(1, args));
+                    cont(arg1, env)
                 }
-                value::Value::Op(operators::Op::Minus) => cont(
-                    arg1,
-                    env,
-                    Callback::Sequence(Vec::new(), args, Box::new(Callback::Minus(next))),
-                ),
-                value::Value::Op(operators::Op::Div) => cont(
-                    arg1,
-                    env,
-                    Callback::Sequence(Vec::new(), args, Box::new(Callback::Div(next))),
-                ),
-                value::Value::Op(operators::Op::Mod) => cont(
-                    arg1,
-                    env,
-                    Callback::Sequence(Vec::new(), args, Box::new(Callback::Mod(next))),
-                ),
-                value::Value::Op(operators::Op::Eq) => cont(
-                    arg1,
-                    env,
-                    Callback::Sequence(Vec::new(), args, Box::new(Callback::Eq(next))),
-                ),
-                value::Value::Op(operators::Op::Gt) => cont(
-                    arg1,
-                    env,
-                    Callback::Sequence(Vec::new(), args, Box::new(Callback::Gt(next))),
-                ),
+                value::Value::Op(operators::Op::Minus) => {
+                    stack.push(Callback::Minus);
+                    stack.push(Callback::Sequence(Vec::new(), args));
+                    cont(arg1, env)
+                }
+                value::Value::Op(operators::Op::Div) => {
+                    stack.push(Callback::Div);
+                    stack.push(Callback::Sequence(Vec::new(), args));
+                    cont(arg1, env)
+                }
+                value::Value::Op(operators::Op::Mod) => {
+                    stack.push(Callback::Mod);
+                    stack.push(Callback::Sequence(Vec::new(), args));
+                    cont(arg1, env)
+                }
+                value::Value::Op(operators::Op::Eq) => {
+                    stack.push(Callback::Eq);
+                    stack.push(Callback::Sequence(Vec::new(), args));
+                    cont(arg1, env)
+                }
+                value::Value::Op(operators::Op::Gt) => {
+                    stack.push(Callback::Gt);
+                    stack.push(Callback::Sequence(Vec::new(), args));
+                    cont(arg1, env)
+                }
                 value::Value::Lambda(var, e, body) => {
                     if !args.is_empty() {
-                        next = Box::new(Callback::Apply(args, next));
+                        stack.push(Callback::Apply(args));
                     }
-                    cont(
-                        arg1,
-                        env,
-                        Callback::Body(var, e, ExprOrValue::Expr(*body), next),
-                    )
+                    stack.push(Callback::Body(var, e, ExprOrValue::Expr(*body)));
+                    cont(arg1, env)
                 }
                 value::Value::Macro(var, env2, body) => {
                     if !args.is_empty() {
-                        next = Box::new(Callback::Apply(args, next));
+                        stack.push(Callback::Apply(args));
                     }
                     let mut env2 = env2;
                     let cloned = env.clone();
@@ -298,24 +296,26 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                             varenv::update(&mut env2, var, v);
                         }
                     }
-                    cont(ExprOrValue::Expr(*body), env2, Callback::Restore(env, next))
+                    stack.push(Callback::Restore(env));
+                    cont(ExprOrValue::Expr(*body), env2)
                 }
-                value::Value::ConstSeq(seq, n) => cont(
-                    arg1,
-                    env,
-                    Callback::Sequence(Vec::new(), args, Box::new(Callback::Fold(seq, n, next))),
-                ),
+                value::Value::ConstSeq(seq, n) => {
+                    stack.push(Callback::Fold(seq, n));
+                    stack.push(Callback::Sequence(Vec::new(), args));
+                    cont(arg1, env)
+                }
                 _ => Err(EvalError::ExpectedFn(v)),
             }
         }
 
-        Callback::Body(var, e, body, next) => {
+        Callback::Body(var, e, body) => {
             let mut e = e;
             varenv::update(&mut e, var, v);
-            cont(body, e, Callback::Restore(env, next))
+            stack.push(Callback::Restore(env));
+            cont(body, e)
         }
 
-        Callback::PartialSum(result, args, next) => {
+        Callback::PartialSum(result, args) => {
             let mut result = result;
             let mut args = args;
             if let value::Value::Int(n) = v {
@@ -325,13 +325,14 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
             }
             if !args.is_empty() {
                 let arg = args.pop_front().unwrap();
-                cont(arg, env, Callback::PartialSum(result, args, next))
+                stack.push(Callback::PartialSum(result, args));
+                cont(arg, env)
             } else {
-                wait(*next, env, value::Value::Int(result))
+                wait(env, value::Value::Int(result))
             }
         }
 
-        Callback::PartialProduct(result, args, next) => {
+        Callback::PartialProduct(result, args) => {
             let mut result = result;
             let mut args = args;
             if let value::Value::Int(n) = v {
@@ -341,25 +342,27 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
             }
             if !args.is_empty() {
                 let arg = args.pop_front().unwrap();
-                cont(arg, env, Callback::PartialProduct(result, args, next))
+                stack.push(Callback::PartialProduct(result, args));
+                cont(arg, env)
             } else {
-                wait(*next, env, value::Value::Int(result))
+                wait(env, value::Value::Int(result))
             }
         }
 
-        Callback::Sequence(results, args, next) => {
+        Callback::Sequence(results, args) => {
             let mut results = results;
             let mut args = args;
             results.push(v);
             if !args.is_empty() {
                 let arg = args.pop_front().unwrap();
-                cont(arg, env, Callback::Sequence(results, args, next))
+                stack.push(Callback::Sequence(results, args));
+                cont(arg, env)
             } else {
-                wait(*next, env, value::Value::Seq(results))
+                wait(env, value::Value::Seq(results))
             }
         }
 
-        Callback::Minus(next) => {
+        Callback::Minus => {
             if let value::Value::Seq(args) = v {
                 let n = args.len();
                 if n != 2 {
@@ -369,33 +372,13 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                     .into_iter()
                     .map(get_int)
                     .collect::<Result<Vec<i64>, EvalError>>()?;
-                wait(*next, env, value::Value::Int(args[0] - args[1]))
+                wait(env, value::Value::Int(args[0] - args[1]))
             } else {
                 Err(EvalError::ExpectedArgc(2, 0))
             }
         }
 
-        Callback::Div(next) => {
-            if let value::Value::Seq(args) = v {
-                let n = args.len();
-                if n != 2 {
-                    return Err(EvalError::ExpectedArgc(2, n));
-                }
-                let args = args
-                    .into_iter()
-                    .map(get_int)
-                    .collect::<Result<Vec<i64>, EvalError>>()?;
-                if args[1] == 0 {
-                    Err(EvalError::DivByZero)
-                } else {
-                    wait(*next, env, value::Value::Int(args[0] / args[1]))
-                }
-            } else {
-                Err(EvalError::ExpectedArgc(2, 0))
-            }
-        }
-
-        Callback::Mod(next) => {
+        Callback::Div => {
             if let value::Value::Seq(args) = v {
                 let n = args.len();
                 if n != 2 {
@@ -408,14 +391,34 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                 if args[1] == 0 {
                     Err(EvalError::DivByZero)
                 } else {
-                    wait(*next, env, value::Value::Int(args[0] % args[1]))
+                    wait(env, value::Value::Int(args[0] / args[1]))
                 }
             } else {
                 Err(EvalError::ExpectedArgc(2, 0))
             }
         }
 
-        Callback::Eq(next) => {
+        Callback::Mod => {
+            if let value::Value::Seq(args) = v {
+                let n = args.len();
+                if n != 2 {
+                    return Err(EvalError::ExpectedArgc(2, n));
+                }
+                let args = args
+                    .into_iter()
+                    .map(get_int)
+                    .collect::<Result<Vec<i64>, EvalError>>()?;
+                if args[1] == 0 {
+                    Err(EvalError::DivByZero)
+                } else {
+                    wait(env, value::Value::Int(args[0] % args[1]))
+                }
+            } else {
+                Err(EvalError::ExpectedArgc(2, 0))
+            }
+        }
+
+        Callback::Eq => {
             if let value::Value::Seq(mut args) = v {
                 let n = args.len();
                 if n != 2 {
@@ -426,22 +429,22 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                 match arg1 {
                     value::Value::Int(v1) => {
                         let v2 = get_int(arg2)?;
-                        wait(*next, env, value::Value::Bool(v1 == v2))
+                        wait(env, value::Value::Bool(v1 == v2))
                     }
                     value::Value::Bool(v1) => {
                         let v2 = get_bool(arg2)?;
-                        wait(*next, env, value::Value::Bool(v1 == v2))
+                        wait(env, value::Value::Bool(v1 == v2))
                     }
                     value::Value::Char(v1) => {
                         let v2 = get_char(arg2)?;
-                        wait(*next, env, value::Value::Bool(v1 == v2))
+                        wait(env, value::Value::Bool(v1 == v2))
                     }
                     value::Value::Str(v1) => {
                         let v2 = get_str(arg2)?;
-                        wait(*next, env, value::Value::Bool(v1 == v2))
+                        wait(env, value::Value::Bool(v1 == v2))
                     }
                     value::Value::Unit => match arg2 {
-                        value::Value::Unit => wait(*next, env, value::Value::Bool(true)),
+                        value::Value::Unit => wait(env, value::Value::Bool(true)),
                         _ => Err(EvalError::ExpectedUnit(arg2)),
                     },
                     _ => Err(EvalError::ExpectedComparable(arg1)),
@@ -451,7 +454,7 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
             }
         }
 
-        Callback::Gt(next) => {
+        Callback::Gt => {
             if let value::Value::Seq(mut args) = v {
                 let n = args.len();
                 if n != 2 {
@@ -462,18 +465,18 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                 match arg1 {
                     value::Value::Int(v1) => {
                         let v2 = get_int(arg2)?;
-                        wait(*next, env, value::Value::Bool(v1 > v2))
+                        wait(env, value::Value::Bool(v1 > v2))
                     }
                     value::Value::Char(v1) => {
                         let v2 = get_char(arg2)?;
-                        wait(*next, env, value::Value::Bool(v1 > v2))
+                        wait(env, value::Value::Bool(v1 > v2))
                     }
                     value::Value::Str(v1) => {
                         let v2 = get_str(arg2)?;
-                        wait(*next, env, value::Value::Bool(v1 > v2))
+                        wait(env, value::Value::Bool(v1 > v2))
                     }
                     value::Value::Unit => match arg2 {
-                        value::Value::Unit => wait(*next, env, value::Value::Bool(false)),
+                        value::Value::Unit => wait(env, value::Value::Bool(false)),
                         _ => Err(EvalError::ExpectedUnit(arg2)),
                     },
                     _ => Err(EvalError::ExpectedOrdered(arg1)),
@@ -483,7 +486,7 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
             }
         }
 
-        Callback::Builtin(b, next) => {
+        Callback::Builtin(b) => {
             if let value::Value::Seq(args) = v {
                 b.argc_matches(args.len())
                     .map_err(|e| EvalError::Builtin(e))?;
@@ -496,14 +499,14 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                         for s in pieces {
                             print!("{}", s)
                         }
-                        wait(*next, env, value::Value::Unit)
+                        wait(env, value::Value::Unit)
                     }
                     builtins::Builtin::IToA => {
                         let args = args
                             .into_iter()
                             .map(get_int)
                             .collect::<Result<Vec<i64>, EvalError>>()?;
-                        wait(*next, env, value::Value::Str(format!("{}", args[0])))
+                        wait(env, value::Value::Str(format!("{}", args[0])))
                     }
                     builtins::Builtin::StrCat => {
                         let pieces = args
@@ -511,14 +514,14 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                             .map(get_str)
                             .collect::<Result<Vec<String>, EvalError>>()?;
                         let result = pieces.into_iter().fold(String::new(), |acc, s| acc + &s);
-                        wait(*next, env, value::Value::Str(result))
+                        wait(env, value::Value::Str(result))
                     }
                     builtins::Builtin::Ord => {
                         let args = args
                             .into_iter()
                             .map(get_char)
                             .collect::<Result<Vec<char>, EvalError>>()?;
-                        wait(*next, env, value::Value::Int(args[0] as i64))
+                        wait(env, value::Value::Int(args[0] as i64))
                     }
                     builtins::Builtin::Chr => {
                         let args = args
@@ -527,7 +530,7 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                             .collect::<Result<Vec<i64>, EvalError>>()?;
                         let x = u32::try_from(args[0]).ok().and_then(|n| char::from_u32(n));
                         if let Some(c) = x {
-                            wait(*next, env, value::Value::Char(c))
+                            wait(env, value::Value::Char(c))
                         } else {
                             Err(EvalError::FailedCharCast(args[0]))
                         }
@@ -541,18 +544,19 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                             let chars: Rc<Vec<value::Value>> =
                                 Rc::new(arg1.chars().map(|c| value::Value::Char(c)).collect());
                             let n = chars.len();
-                            wait(Callback::HandleFold(chars, n, k, next), env, f)
+                            stack.push(Callback::HandleFold(chars, n, k));
+                            wait(env, f)
                         } else {
                             let arg = get_str(args.pop().unwrap())?;
                             let chars: Rc<Vec<value::Value>> =
                                 Rc::new(arg.chars().map(|c| value::Value::Char(c)).collect());
                             let n = chars.len();
-                            wait(*next, env, value::Value::ConstSeq(chars, n))
+                            wait(env, value::Value::ConstSeq(chars, n))
                         }
                     }
                     builtins::Builtin::List => {
                         let n = args.len();
-                        wait(*next, env, value::Value::ConstSeq(Rc::new(args), n))
+                        wait(env, value::Value::ConstSeq(Rc::new(args), n))
                     }
                 }
             } else {
@@ -560,7 +564,7 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
             }
         }
 
-        Callback::Load(rest, body, next) => {
+        Callback::Load(rest, body) => {
             if let value::Value::Str(first) = v {
                 let file = File::open(first).unwrap();
                 let buffer = charutils::BufReadChars::new(BufReader::new(file));
@@ -569,29 +573,23 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                     .or_else(|e| Err(EvalError::SParseError(e)))
                     .and_then(|sexp| parser::parse(sexp).map_err(|e| EvalError::ParseError(e)))?;
                 if rest.is_empty() {
-                    cont(
-                        ExprOrValue::Expr(expr),
-                        env,
-                        Callback::DropResult(body, next),
-                    )
+                    stack.push(Callback::DropResult(body));
+                    cont(ExprOrValue::Expr(expr), env)
                 } else {
                     let mut rest = rest;
                     let first = rest.pop_front().unwrap();
-                    cont(
-                        ExprOrValue::Expr(expr),
-                        env,
-                        Callback::DropResult(
-                            ExprOrValue::Value(value::Value::Str(first)),
-                            Box::new(Callback::Load(rest, body, next)),
-                        ),
-                    )
+                    stack.push(Callback::Load(rest, body));
+                    stack.push(Callback::DropResult(ExprOrValue::Value(value::Value::Str(
+                        first,
+                    ))));
+                    cont(ExprOrValue::Expr(expr), env)
                 }
             } else {
                 Err(EvalError::ExpectedStr(v))
             }
         }
 
-        Callback::Fold(values, num_values, next) => {
+        Callback::Fold(values, num_values) => {
             if let value::Value::Seq(mut args) = v {
                 let n = args.len();
                 if n != 2 {
@@ -599,105 +597,91 @@ fn run_cb(cb: Callback, env: Rc<varenv::Env>, v: value::Value) -> Result<Outcome
                 }
                 let f = args.pop().unwrap();
                 let k = args.pop().unwrap();
-                if n == 0 {
-                    wait(*next, env, f)
-                } else {
-                    wait(Callback::HandleFold(values, num_values, k, next), env, f)
-                }
+                stack.push(Callback::HandleFold(values, num_values, k));
+                wait(env, f)
             } else {
                 Err(EvalError::ExpectedArgc(2, 0))
             }
         }
 
-        Callback::HandleFold(values, n, k, next) => {
+        Callback::HandleFold(values, n, k) => {
             if n == 0 {
-                return wait(*next, env, v);
+                return wait(env, v);
             }
             let n = n - 1;
-            let val = &values[n];
+            let val = values[n].clone();
             let kclone = k.clone();
-            wait(
-                Callback::Apply(
-                    VecDeque::from(vec![ExprOrValue::Value(val.clone()), ExprOrValue::Value(v)]),
-                    Box::new(Callback::HandleFold(values, n, k, next)),
-                ),
-                env,
-                kclone,
-            )
+            stack.push(Callback::HandleFold(values, n, k));
+            stack.push(Callback::Apply(VecDeque::from(vec![
+                ExprOrValue::Value(val),
+                ExprOrValue::Value(v),
+            ])));
+            wait(env, kclone)
         }
     }
 }
 
-pub fn do_one_step(w: Work) -> Result<Outcome, EvalError> {
+pub fn do_one_step(w: Work, stack: &mut Vec<Callback>) -> Result<Outcome, EvalError> {
     let env = w.env;
     match w.expr {
-        ExprOrValue::Value(v) => run_cb(w.callback, env, v),
-        ExprOrValue::Expr(parser::Expr::Int(n)) => run_cb(w.callback, env, value::Value::Int(n)),
-        ExprOrValue::Expr(parser::Expr::Bool(b)) => run_cb(w.callback, env, value::Value::Bool(b)),
-        ExprOrValue::Expr(parser::Expr::Char(c)) => run_cb(w.callback, env, value::Value::Char(c)),
-        ExprOrValue::Expr(parser::Expr::Str(s)) => run_cb(w.callback, env, value::Value::Str(s)),
-        ExprOrValue::Expr(parser::Expr::OpExp(o)) => run_cb(w.callback, env, value::Value::Op(o)),
-        ExprOrValue::Expr(parser::Expr::Unit) => run_cb(w.callback, env, value::Value::Unit),
+        ExprOrValue::Value(v) => run_cb(stack, env, v),
+        ExprOrValue::Expr(parser::Expr::Int(n)) => run_cb(stack, env, value::Value::Int(n)),
+        ExprOrValue::Expr(parser::Expr::Bool(b)) => run_cb(stack, env, value::Value::Bool(b)),
+        ExprOrValue::Expr(parser::Expr::Char(c)) => run_cb(stack, env, value::Value::Char(c)),
+        ExprOrValue::Expr(parser::Expr::Str(s)) => run_cb(stack, env, value::Value::Str(s)),
+        ExprOrValue::Expr(parser::Expr::OpExp(o)) => run_cb(stack, env, value::Value::Op(o)),
+        ExprOrValue::Expr(parser::Expr::Unit) => run_cb(stack, env, value::Value::Unit),
         ExprOrValue::Expr(parser::Expr::Word(var)) => match env.get(&var) {
             Some(v) => {
                 if let value::Value::Thunk(e, body) = v {
-                    cont(
-                        ExprOrValue::Expr(*body),
-                        e,
-                        Callback::Restore(env, Box::new(w.callback)),
-                    )
+                    stack.push(Callback::Restore(env));
+                    cont(ExprOrValue::Expr(*body), e)
                 } else {
-                    run_cb(w.callback, env, v)
+                    run_cb(stack, env, v)
                 }
             }
             None => match builtins::Builtin::from_str(&var) {
-                Some(b) => run_cb(w.callback, env, value::Value::Builtin(b)),
+                Some(b) => run_cb(stack, env, value::Value::Builtin(b)),
                 _ => Err(EvalError::UndefinedVar(var.to_string())),
             },
         },
         ExprOrValue::Expr(parser::Expr::Ap(args)) => {
             let mut args: VecDeque<ExprOrValue> = args.into_iter().map(ExprOrValue::Expr).collect();
             let head = args.pop_front().unwrap();
-            cont(head, env, Callback::Apply(args, Box::new(w.callback)))
+            stack.push(Callback::Apply(args));
+            cont(head, env)
         }
-        ExprOrValue::Expr(parser::Expr::Let(var, e1, e2)) => cont(
-            ExprOrValue::Expr(*e1),
-            env,
-            Callback::Update(var, ExprOrValue::Expr(*e2), Box::new(w.callback)),
-        ),
+        ExprOrValue::Expr(parser::Expr::Let(var, e1, e2)) => {
+            stack.push(Callback::Update(var, ExprOrValue::Expr(*e2)));
+            cont(ExprOrValue::Expr(*e1), env)
+        }
         ExprOrValue::Expr(parser::Expr::Lambda(var, body)) => {
             let cloned = env.clone();
-            run_cb(w.callback, env, value::Value::Lambda(var, cloned, body))
+            run_cb(stack, env, value::Value::Lambda(var, cloned, body))
         }
         ExprOrValue::Expr(parser::Expr::Macro(var, body)) => {
             let cloned = env.clone();
-            run_cb(w.callback, env, value::Value::Macro(var, cloned, body))
+            run_cb(stack, env, value::Value::Macro(var, cloned, body))
         }
-        ExprOrValue::Expr(parser::Expr::If(guard, branch, default)) => cont(
-            ExprOrValue::Expr(*guard),
-            env,
-            Callback::Branch(
+        ExprOrValue::Expr(parser::Expr::If(guard, branch, default)) => {
+            stack.push(Callback::Branch(
                 ExprOrValue::Expr(*branch),
                 ExprOrValue::Expr(*default),
-                Box::new(w.callback),
-            ),
-        ),
-        ExprOrValue::Expr(parser::Expr::Trace(msg, body)) => cont(
-            ExprOrValue::Expr(*msg),
-            env,
-            Callback::Print(ExprOrValue::Expr(*body), Box::new(w.callback)),
-        ),
+            ));
+            cont(ExprOrValue::Expr(*guard), env)
+        }
+        ExprOrValue::Expr(parser::Expr::Trace(msg, body)) => {
+            stack.push(Callback::Print(ExprOrValue::Expr(*body)));
+            cont(ExprOrValue::Expr(*msg), env)
+        }
         ExprOrValue::Expr(parser::Expr::Load(files, body)) => {
             let mut files: VecDeque<String> = files.into();
             if files.is_empty() {
-                return cont(ExprOrValue::Expr(*body), env, w.callback);
+                return cont(ExprOrValue::Expr(*body), env);
             }
             let first = files.pop_front().unwrap();
-            cont(
-                ExprOrValue::Value(value::Value::Str(first)),
-                env,
-                Callback::Load(files, ExprOrValue::Expr(*body), Box::new(w.callback)),
-            )
+            stack.push(Callback::Load(files, ExprOrValue::Expr(*body)));
+            cont(ExprOrValue::Value(value::Value::Str(first)), env)
         }
         ExprOrValue::Expr(parser::Expr::Fail) => Err(EvalError::Fail),
     }
@@ -710,10 +694,10 @@ pub fn eval_with_env(
     let mut w = Work {
         expr: ExprOrValue::Expr(e),
         env: env.clone(),
-        callback: Callback::Return,
     };
+    let mut stack = Vec::new();
     loop {
-        let result = do_one_step(w)?;
+        let result = do_one_step(w, &mut stack)?;
         match result {
             Outcome::Done(v, env) => {
                 return Ok((v, env));
